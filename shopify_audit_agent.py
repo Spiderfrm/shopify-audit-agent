@@ -1,44 +1,56 @@
 """
-Shopify Audit & Outreach Agent
---------------------------------
+Shopify Audit & Outreach Agent (Autonomous Lead Discovery Edition)
+--------------------------------------------------------------------
 A closed-loop AI workflow built on the Coasty computer-use API.
 
 WHAT THIS DOES (in plain terms):
-1. Takes a list of real Shopify store URLs
-2. For each store, sends an AI agent to actually visit the site and check
-   for real, common problems (page speed, image size, checkout friction,
-   mobile experience, broken links, trust signals)
-3. Sends a SECOND agent pass to independently re-verify the most important
+0. AUTONOMOUSLY DISCOVERS new small Shopify stores on its own each run --
+   you don't have to manually hunt for URLs. It remembers every store
+   it has already processed (in seen_stores.json) so it never repeats
+   the same lead twice across runs.
+1. For each discovered (or fallback) store, sends an AI agent to actually
+   visit the site and check for real, common problems (page speed, image
+   size, checkout friction, mobile experience, broken links, trust
+   signals)
+2. Sends a SECOND agent pass to independently re-verify the most important
    finding for each store (cross-verification, not just one pass)
-4. Scores and ranks every store by "opportunity" -- how many real,
+3. Scores and ranks every store by "opportunity" -- how many real,
    fixable problems it has
-5. Drafts a personalized outreach message for the top-ranked stores,
+4. Drafts a personalized outreach message for the top-ranked stores,
    referencing the SPECIFIC issues found on THAT store
-6. Requires human approval before any message is marked "ready to send"
-7. Saves everything as a durable, readable report file (audit_report.md)
+5. Requires human approval before any message is marked "ready to send"
+6. Saves everything as a durable, readable report file (audit_report.md)
+   and updates seen_stores.json so tomorrow's run finds fresh leads
 
 WHY THIS IS A REAL BUSINESS WORKFLOW (not a toy demo):
-This solves an actual freelance problem: instead of cold-pitching stores
-with generic messages, this finds real evidence-backed issues first,
-so outreach can say "I noticed X, Y, Z on your store" instead of
-"want to hire me?"
+This solves an actual freelance problem: instead of manually hunting for
+leads AND cold-pitching with generic messages, this finds NEW real stores
+on its own, evidence-backs the pitch, and never wastes a day re-contacting
+someone already reached out to.
+
+SAFETY NET: if autonomous discovery can't find enough new stores in a
+run (rate limits, a quiet day, etc.), the script automatically falls
+back to a manual backup list (FALLBACK_STORE_URLS below) so a run never
+comes up empty.
 
 HOW TO RUN THIS:
 1. pip install requests
 2. Get your live API key from https://coasty.ai/developers/keys
 3. Set it as an environment variable:
        export COASTY_API_KEY="sk-coasty-live-..."
-4. Edit the STORE_URLS list below with your real stores
+4. (Optional) adjust DAILY_TARGET below for how many new stores per run
 5. Run:
        python3 shopify_audit_agent.py
 6. Follow the prompts for the human-approval step
-7. Check audit_report.md when it finishes
+7. Check audit_report.md when it finishes -- run it again tomorrow and
+   it will automatically find fresh, never-before-seen stores
 """
 
 import os
 import sys
 import time
 import json
+import re
 import requests
 
 BASE = "https://coasty.ai/v1"
@@ -51,8 +63,14 @@ if not API_KEY:
 
 HEADERS = {"X-API-Key": API_KEY}
 
-# ---- STEP 1: Your real store list ----
-STORE_URLS = [
+# ---- How many NEW stores to find and process per run ----
+DAILY_TARGET = 5
+
+# ---- Where we remember stores we've already contacted ----
+SEEN_STORES_FILE = "seen_stores.json"
+
+# ---- Safety net: used only if autonomous discovery comes up short ----
+FALLBACK_STORE_URLS = [
     "https://aguaprimo.myshopify.com",
     "https://dontaedemarcusllc.com",
     "https://ellisstores.com",
@@ -94,6 +112,86 @@ def run_coasty_task(task_description: str, idempotency_key: str, max_steps: int 
             return status_data
 
         time.sleep(3)
+
+
+def load_seen_stores() -> set:
+    """
+    Loads the set of store URLs we've already discovered/contacted in
+    previous runs, so we never repeat a lead. Returns an empty set if
+    this is the first run (file doesn't exist yet).
+    """
+    if not os.path.exists(SEEN_STORES_FILE):
+        return set()
+    try:
+        with open(SEEN_STORES_FILE, "r") as f:
+            data = json.load(f)
+            return set(data.get("seen_urls", []))
+    except (json.JSONDecodeError, IOError):
+        return set()
+
+
+def save_seen_stores(seen_urls: set):
+    """
+    Persists the growing list of already-contacted stores to disk so
+    tomorrow's run knows to skip them.
+    """
+    with open(SEEN_STORES_FILE, "w") as f:
+        json.dump({"seen_urls": sorted(list(seen_urls))}, f, indent=2)
+
+
+def discover_new_stores(seen_urls: set, target_count: int) -> list:
+    """
+    PHASE 0: Autonomous lead discovery.
+    Sends a Coasty agent out to find small, real, independent Shopify
+    stores on its own (via search / small-business directories / social
+    platforms), explicitly avoiding big established brands and avoiding
+    anything already in seen_urls.
+
+    Returns a list of discovered store URLs (may be shorter than
+    target_count if the agent can't find enough good candidates --
+    that's expected and handled by the fallback in main()).
+    """
+    print(f"\n=== Discovering {target_count} new small Shopify stores ===")
+
+    already_seen_list = "\n".join(f"- {u}" for u in seen_urls) if seen_urls else "(none yet)"
+
+    task = f"""
+Search online (search engines, small-business directories, or social
+platforms) to find {target_count} REAL, currently active, SMALL
+independent Shopify stores -- not large established brands.
+
+Good signs of a small store: default myshopify.com domain OR a small
+custom domain, recent posts/launch activity, limited product catalog,
+looks like an independent seller rather than a corporation.
+
+Do NOT include any of these stores, they have already been found/contacted
+in previous runs:
+{already_seen_list}
+
+For each store you find, verify it actually loads and looks like a real,
+active Shopify store before including it.
+
+Report your findings as a simple numbered list of full URLs only, one
+per line, nothing else. Aim for exactly {target_count} if possible, but
+report fewer if you genuinely cannot verify that many real, new, small
+stores.
+"""
+    result = run_coasty_task(task, idempotency_key=f"discover-{int(time.time())}", max_steps=45)
+    summary = result.get("result", {})
+    summary_text = summary.get("summary", "") if isinstance(summary, dict) else str(summary)
+
+    # Pull anything that looks like a URL out of the agent's response
+    found_urls = re.findall(r"https?://[^\s\)\]\"']+", summary_text)
+
+    # De-duplicate and filter out anything we've already seen
+    new_urls = []
+    for url in found_urls:
+        clean_url = url.rstrip(".,;")
+        if clean_url not in seen_urls and clean_url not in new_urls:
+            new_urls.append(clean_url)
+
+    print(f"  Discovered {len(new_urls)} genuinely new store(s).")
+    return new_urls[:target_count]
 
 
 def audit_store(store_url: str, index: int):
@@ -197,8 +295,29 @@ Store checked: {store_url}
 def main():
     all_results = []
 
+    # PHASE 0: Autonomous discovery, with a safety-net fallback
+    seen_urls = load_seen_stores()
+    discovered = discover_new_stores(seen_urls, DAILY_TARGET)
+
+    if len(discovered) < DAILY_TARGET:
+        print(f"\n  Discovery found only {len(discovered)}/{DAILY_TARGET}. "
+              f"Filling the rest from the fallback list.")
+        needed = DAILY_TARGET - len(discovered)
+        fallback_candidates = [u for u in FALLBACK_STORE_URLS
+                                if u not in seen_urls and u not in discovered]
+        discovered.extend(fallback_candidates[:needed])
+
+    if not discovered:
+        print("\n  No new stores available from discovery or fallback list. Exiting.")
+        return
+
+    store_urls_for_this_run = discovered
+    print(f"\n  Final list for this run ({len(store_urls_for_this_run)} stores):")
+    for u in store_urls_for_this_run:
+        print(f"   - {u}")
+
     # PHASE 1: Audit every store
-    for i, url in enumerate(STORE_URLS):
+    for i, url in enumerate(store_urls_for_this_run):
         audit_result = audit_store(url, i)
         summary = audit_result.get("result", {})
         summary_text = summary.get("summary", "") if isinstance(summary, dict) else str(summary)
@@ -212,7 +331,7 @@ def main():
     # PHASE 2: Verify the top finding for each store
     for entry in all_results:
         verify_result = verify_top_finding(entry["url"], entry["audit_summary"],
-                                            STORE_URLS.index(entry["url"]))
+                                            store_urls_for_this_run.index(entry["url"]))
         verify_summary = verify_result.get("result", {})
         verify_text = verify_summary.get("summary", "") if isinstance(verify_summary, dict) else str(verify_summary)
         entry["verification"] = verify_text
@@ -260,7 +379,13 @@ def main():
         else:
             f.write("No messages were approved this run.\n")
 
-    print("\n\nDone! Full report saved to audit_report.md")
+    # Remember every store we processed this run, so tomorrow's run
+    # automatically discovers fresh, never-before-seen leads
+    seen_urls.update(store_urls_for_this_run)
+    save_seen_stores(seen_urls)
+
+    print(f"\n\nDone! Full report saved to audit_report.md")
+    print(f"Memory updated: {len(seen_urls)} total store(s) now tracked in {SEEN_STORES_FILE}")
 
 
 if __name__ == "__main__":
