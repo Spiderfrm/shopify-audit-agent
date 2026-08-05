@@ -200,35 +200,33 @@ def audit_store(store_url: str, index: int):
     Checks page speed, images, checkout friction, mobile experience,
     broken links, and trust signals -- and asks the agent to score
     itself 1-10 on how many real, fixable problems it found (the
-    'opportunity score').
-    """
-    print(f"\n=== Auditing store {index + 1}: {store_url} ===")
-
-    task = f"""
-Visit {store_url} and act as a professional e-commerce auditor.
-Check the following and report specific, concrete findings for each:
-
-1. Page load speed - does the site feel slow, especially on the
-   homepage and a product page? Note anything that looks unoptimized.
-2. Image sizes - are product images large/uncompressed? Note any
-   pages that seem heavy with images.
-3. Checkout friction - go through as much of the checkout flow as
-   possible (add an item to cart, view cart). Count how many steps
-   or clicks it takes. Note any confusing or slow parts.
-4. Mobile-style layout - note anything that looks like it would be
-   awkward on a small mobile screen (based on what's visible).
-5. Broken links or errors - click a few navigation links and note
-   any 404s or broken pages.
-6. Trust signals - are there clear shipping costs, return policy,
-   reviews, or trust badges visible?
+< truncated lines 203-228 >
+   as written. If there is no publicly listed email, say "no public
+   email found" -- do not guess or fabricate one.
 
 At the end, give an "Opportunity Score" from 1-10 (10 = many real,
 fixable problems found = a strong lead for a freelance optimization
 pitch; 1 = the store already looks well-optimized).
 Keep your final result under 1800 characters, prioritizing the
-Opportunity Score and the 2-3 most important findings.
+Opportunity Score, the contact email (or "no public email found"),
+and the 2-3 most important findings.
 """
     return run_coasty_task(task, idempotency_key=f"audit-{index}-{int(time.time())}", max_steps=50)
+
+
+def extract_contact_email(summary_text: str) -> str:
+    """
+    Pulls a publicly-listed contact email out of the agent's audit
+    summary, if one was found and reported. Returns a clear "not found"
+    message otherwise -- this is informational only, nothing here ever
+    triggers an automatic send.
+    """
+    if not summary_text:
+        return "no public email found"
+    match = re.search(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", summary_text)
+    if match:
+        return match.group(0)
+    return "no public email found"
 
 
 def verify_top_finding(store_url: str, first_pass_summary: str, index: int):
@@ -271,13 +269,22 @@ def extract_opportunity_score(summary_text: str) -> int:
     return 5
 
 
-def draft_outreach_message(store_url: str, findings_summary: str) -> str:
+def draft_outreach_message(store_url: str, findings_summary: str, contact_email: str) -> str:
     """
     Drafts a personalized outreach message referencing the SPECIFIC
     issues found on this store. This is plain text templating, not an
     AI call, since the findings are already collected -- keeps this
     step fast, cheap, and fully deterministic.
+
+    IMPORTANT: This message is NEVER sent automatically. The contact
+    email (if found) is shown for YOU to manually copy into your own
+    email client after reviewing the draft. This keeps a real human
+    approval step before any outreach actually goes out.
     """
+    email_line = (f"Send to (found publicly on their site): {contact_email}"
+                  if contact_email != "no public email found"
+                  else "No public email found -- consider reaching out via the store's contact form or social media instead.")
+
     return f"""Hi! I run a Shopify speed & conversion optimization service and came
 across your store while researching independent shops. I noticed a
 few specific things that might be costing you sales:
@@ -289,6 +296,11 @@ how I'd fix these and what kind of impact it could have. Would that
 be useful?
 
 Store checked: {store_url}
+
+--- FOR YOU (not part of the message) ---
+{email_line}
+This is a DRAFT ONLY. Review it, then send it yourself -- nothing in
+this script sends emails automatically.
 """
 
 
@@ -326,6 +338,7 @@ def main():
             "url": url,
             "audit_summary": summary_text,
             "opportunity_score": extract_opportunity_score(summary_text),
+            "contact_email": extract_contact_email(summary_text),
         })
 
     # PHASE 2: Verify the top finding for each store
@@ -349,7 +362,7 @@ def main():
 
     print("\n\n========== OUTREACH DRAFTS (need your approval) ==========")
     for entry in top_candidates:
-        draft = draft_outreach_message(entry["url"], entry["audit_summary"])
+        draft = draft_outreach_message(entry["url"], entry["audit_summary"], entry["contact_email"])
         print(f"\n--- Draft for {entry['url']} ---")
         print(draft)
 
