@@ -186,7 +186,7 @@ stores.
     # De-duplicate and filter out anything we've already seen
     new_urls = []
     for url in found_urls:
-        clean_url = url.rstrip(".,;")
+        clean_url = url.rstrip(".,;`")
         if clean_url not in seen_urls and clean_url not in new_urls:
             new_urls.append(clean_url)
 
@@ -200,18 +200,33 @@ def audit_store(store_url: str, index: int):
     Checks page speed, images, checkout friction, mobile experience,
     broken links, and trust signals -- and asks the agent to score
     itself 1-10 on how many real, fixable problems it found (the
-< truncated lines 203-228 >
-   as written. If there is no publicly listed email, say "no public
-   email found" -- do not guess or fabricate one.
+    quality of the lead for a freelance optimization pitch).
+"""
+    task = f"""
+Audit the Shopify store at {store_url} as a potential optimization client.
+Visit the live site and check the homepage, at least one product page, and
+the checkout flow without completing a purchase.
+
+Look for real, observable issues involving:
+- page speed and slow-loading content
+- oversized or poorly optimized images
+- mobile layout and usability
+- broken links or navigation problems
+- checkout friction
+- trust signals, policies, and contact information
+
+For every issue, include a brief concrete observation and explain why it
+could affect a shopper or conversion. Do not invent problems, metrics,
+contact details, or emails. If there is no publicly listed email, say
+"no public email found".
 
 At the end, give an "Opportunity Score" from 1-10 (10 = many real,
-fixable problems found = a strong lead for a freelance optimization
-pitch; 1 = the store already looks well-optimized).
-Keep your final result under 1800 characters, prioritizing the
-Opportunity Score, the contact email (or "no public email found"),
-and the 2-3 most important findings.
+fixable problems found and a strong lead; 1 = the store already looks
+well-optimized). Keep your final result under 1800 characters, prioritizing
+the Opportunity Score, the contact email (or "no public email found"), and
+the 2-3 most important findings.
 """
-    return run_coasty_task(task, idempotency_key=f"audit-{index}-{int(time.time())}", max_steps=50)
+    return run_coasty_task(task, idempotency_key=f"audit-{index}-{int(time.time())}", max_steps=70)
 
 
 def extract_contact_email(summary_text: str) -> str:
